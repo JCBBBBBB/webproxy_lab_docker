@@ -1,117 +1,69 @@
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <unistd.h>
-#include <sys/types.h>
-#include <sys/socket.h>
-#include <netdb.h>
-#include <arpa/inet.h>
-
-#define BACKLOG 10
-#define BUFFER_SIZE 4096
-
-static void usage(const char *progname)
-{
-    fprintf(stderr, "Usage: %s <port>\n", progname);
-}
-
-static int open_listenfd(const char *port)
-{
-    struct addrinfo hints;
-    struct addrinfo *listp;
-    struct addrinfo *p;
-    int listenfd;
-    int optval = 1;
-    int rc;
-
-    memset(&hints, 0, sizeof(hints));
-    hints.ai_socktype = SOCK_STREAM;
-    hints.ai_flags = AI_PASSIVE | AI_ADDRCONFIG | AI_NUMERICSERV;
-
-    if ((rc = getaddrinfo(NULL, port, &hints, &listp)) != 0) {
-        fprintf(stderr, "getaddrinfo error: %s\n", gai_strerror(rc));
-        return -1;
-    }
-
-    for (p = listp; p != NULL; p = p->ai_next) {
-        listenfd = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
-        if (listenfd < 0) {
-            continue;
-        }
-
-        setsockopt(listenfd, SOL_SOCKET, SO_REUSEADDR, (const void *)&optval, sizeof(int));
-
-        if (bind(listenfd, p->ai_addr, p->ai_addrlen) == 0) {
-            break;
-        }
-
-        close(listenfd);
-    }
-
-    freeaddrinfo(listp);
-
-    if (p == NULL) {
-        return -1;
-    }
-
-    if (listen(listenfd, BACKLOG) < 0) {
-        close(listenfd);
-        return -1;
-    }
-
-    return listenfd;
-}
-
-static void echo_client(int connfd)
-{
-    char buffer[BUFFER_SIZE];
-    ssize_t nread;
-
-    while ((nread = read(connfd, buffer, sizeof(buffer))) > 0) {
-        ssize_t total_written = 0;
-
-        while (total_written < nread) {
-            ssize_t nwritten = write(connfd, buffer + total_written, (size_t)(nread - total_written));
-            if (nwritten <= 0) {
-                return;
-            }
-            total_written += nwritten;
-        }
-    }
-}
+#include "../csapp.h"
 
 void echo(int connfd);
 
-int main(int argc, char **argv) // agrc : 명령줄 인자의 개수, argv : 명령줄 인자 문자열 배열 -> argv[0] : "./echoserver", argv[1] = "8000"(서버가 기다릴 포트 번호)
+//클라와 실제 통신하고 받은 내용을 그대로 돌려주는 역할
+void echo(int connfd) // 현재 클라와 연결된 소켓번호
+{   
+    // 한번 읽을 때 몇바이트 읽었는지 저장
+    size_t n;
+
+    // 클라이언트가 보낸 문자열을 담는 버퍼
+    char buf[MAXLINE];
+
+    // RIO 읽기 상태를 관리하는 구조체
+    rio_t rio;
+
+    // connfd에서 들어오는 데이터를 RIO 방식으로 읽겠다는 준비
+    Rio_readinitb(&rio, connfd);
+
+    // 읽은 바이트 수를 n에 저장
+    // 읽은게 0이 아니면 계속 반복
+    while ((n = Rio_readlineb(&rio, buf, MAXLINE)) != 0) { //Rio_readlineb -> hello\n
+
+        //서버 실제로 몇바이트 받았는지 출력
+        printf("server received %zu bytes %c\n", n, buf);
+
+        // 클라가 보낸 buf의 내용을 다시 클라에게 보낸다
+        Rio_writen(connfd, buf, n); // n바이트를 끝까지 확실하게 써주는 함수
+    }
+}
+
+int main(int argc, char **argv)
 {
-    int listenfd, connfd; // //듣기 식별자, 연결 식별자
-    socklen_t clientlen; // 클라이언트 주소 구조체 길이 저장 -> accept에서 클라이언트 주소를 받아올 때 -> 주소를 저장할 메모리공간, 그 공간의 크기 알아야 함
+    int listenfd, connfd;
+    socklen_t clientlen; // clientaddr의 길이
+    struct sockaddr_storage clientaddr; // 클라이언트의 주소를 담는 구조체
+    char hostname[MAXLINE], port[MAXLINE]; // echo, 8080
 
-    // 클라이언트 주소를 담아둘 큰 그릇
-    // IPv4일 수도 있고, IPv6일 수도 있어서 둘 다 안전하게 담을 수 있는 넉넉한 공통 구조체를 쓰는 것
-    struct sockaddr_storage clientaddr;
-
-    // host : 클라이언트 host 정보가 들어갈 문자열, service : 클라이어느트이 service 정보가 들어갈 문자열
-    // 나중에 getnameinfo가 주소 구조체를 사람이 읽을 수 있는 문자열로 바꿔서 여기에 넣어준다
-    char host[MAXLINE], service[MAXLINE];
-
-    if(argc != 2)
-    {
+    if (argc != 2) { // 2개가 아니라면 오류
         fprintf(stderr, "usage: %s <port>\n", argv[0]);
-        exit(0);
+        exit(1);
     }
 
-    // 포트번호 가지고 서버용 listening socket을 만든다
-    // ex) 터미널에서 ./echoserver 8000 입력 
-    //
-    listenfd = Open_listenfd(argv[1]);
+    // 서버용 듣기 소켓을 만든다
+    // 새 연결을 기다리는 소켓
+    listenfd = Open_listenfd(argv[1]); // 8080포트로 listen 소켓을 생성한다
 
-    // 클라이언트 한 명 처리
-    // 또 다음 사람 처리
-    // 또 다음 사람 처리 반복
-    while(1)
-    {   
-        //
-        clientlen = sizeof(struct sockaddr_storage);
+    while (1) 
+    {
+        clientlen = sizeof(clientaddr);
+
+        //클라이언트와 대화할 전용 소켓을 만든다
+        // Accept가 접속한 클라이언트 주소 정보를 clientaddr에 채워주고
+        // (struct sockaddr *) 라는 뜻
+        connfd = Accept(listenfd, (SA *)&clientaddr, &clientlen); // 클라가 connect한걸 연결해주는 거
+
+        // 접속한 클라이언트 정보를 문자열로 바꾼다
+        Getnameinfo((SA *)&clientaddr, clientlen, hostname, MAXLINE, port, MAXLINE, 0);
+
+        //서버가 클라이언트 1개 연결을 받았다는 뜻
+        // ex ) Connected to (localhost, 51240)
+        // 서버는 8080 포트에서 기다리고 있는데 클라는 127.0.0.1:51240이라는 주소로 접속함
+        printf("Connected to (%s, %s)\n", hostname, port); 
+
+        // 클라이언트를 실제로 응대
+        echo(connfd);
+        Close(connfd);
     }
 }

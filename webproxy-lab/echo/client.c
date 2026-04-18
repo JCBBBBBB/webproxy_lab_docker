@@ -1,101 +1,53 @@
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <unistd.h>
-#include <sys/types.h>
-#include <sys/socket.h>
-#include <netdb.h>
+#include "../csapp.h"
 
-#define BUFFER_SIZE 4096
+//서버 실행:
+// ./echo 8080
 
-static void usage(const char *progname)
-{
-    fprintf(stderr, "Usage: %s <host> <port>\n", progname);
-}
+// 클라이언트 실행:
+// ./client 127.0.0.1 8080
 
-static int open_clientfd(const char *hostname, const char *port)
-{
-    struct addrinfo hints;
-    struct addrinfo *listp;
-    struct addrinfo *p;
-    int clientfd;
-    int rc;
 
-    memset(&hints, 0, sizeof(hints));
-    hints.ai_socktype = SOCK_STREAM;
-    hints.ai_flags = AI_ADDRCONFIG | AI_NUMERICSERV;
-
-    if ((rc = getaddrinfo(hostname, port, &hints, &listp)) != 0) {
-        fprintf(stderr, "getaddrinfo error: %s\n", gai_strerror(rc));
-        return -1;
-    }
-
-    for (p = listp; p != NULL; p = p->ai_next) {
-        clientfd = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
-        if (clientfd < 0) {
-            continue;
-        }
-
-        if (connect(clientfd, p->ai_addr, p->ai_addrlen) == 0) {
-            break;
-        }
-
-        close(clientfd);
-    }
-
-    freeaddrinfo(listp);
-
-    if (p == NULL) {
-        return -1;
-    }
-
-    return clientfd;
-}
 
 int main(int argc, char **argv)
 {
-    int clientfd;
-    char sendbuf[BUFFER_SIZE];
-    char recvbuf[BUFFER_SIZE];
+    int clientfd; // 서버에 연결된 클라의 소켓 번호
 
+    // host : 접속할 서버 주소
+    // prot : 접속할 포트 번호
+    // buf[MAXLINE] : 입력한 문자열이나 서버가 보내준 문자열을 잠시 담는 공간
+    char *host, *port, buf[MAXLINE]; // ./client 127.0.0.1 8080
+
+    // 소켓에서 한 줄씩 안전하게 읽기 위한 준비물
+    rio_t rio;
+    
+    //실행 형식이 맞는지 검사
     if (argc != 3) {
-        usage(argv[0]);
-        return 1;
+        fprintf(stderr, "usage: %s <host> <port>\n", argv[0]);
+        exit(1);
     }
 
-    clientfd = open_clientfd(argv[1], argv[2]);
-    if (clientfd < 0) {
-        fprintf(stderr, "Failed to connect to %s:%s\n", argv[1], argv[2]);
-        return 1;
+    // host에 있는 주소
+    host = argv[1]; // 127.0.0.1
+
+    // 포트 번호
+    port = argv[2]; // 8080
+
+    // 서버에 연결을 시도해서, 성공하면 연결된 소켓 디스크립터를 반환한다.
+    // 여기서 반환된 clientfd라는 소켓 번호를  가지고 이후에 서버와 읽고 쓰기를 한다
+    clientfd = Open_clientfd(host, port);
+
+    //서버 쪽에서 오는 데이터를 안전하게 읽기 위한 준비
+    Rio_readinitb(&rio, clientfd);
+
+    // 사용자가 입력하는 동안 계속
+    while (Fgets(buf, MAXLINE, stdin) != NULL) {
+        Rio_writen(clientfd, buf, strlen(buf)); // 사용자가 입력한 문자열을 서버에 보낸다   ex) hello
+        Rio_readlineb(&rio, buf, MAXLINE); // 서버가 보내는 한 줄을 읽어서 buf에 저장한다   ex) hello buf에 저장
+        Fputs(buf, stdout);// buf에 들어있는 문자열을 화면에 출력한다 ex) hello 출력
     }
 
-    printf("Connected to %s:%s\n", argv[1], argv[2]);
-    printf("Type a message and press Enter. Press Ctrl+D to quit.\n");
-
-    while (fgets(sendbuf, sizeof(sendbuf), stdin) != NULL) {
-        size_t len = strlen(sendbuf);
-        size_t total_sent = 0;
-
-        while (total_sent < len) {
-            ssize_t nwritten = write(clientfd, sendbuf + total_sent, len - total_sent);
-            if (nwritten <= 0) {
-                fprintf(stderr, "Write error\n");
-                close(clientfd);
-                return 1;
-            }
-            total_sent += (size_t)nwritten;
-        }
-
-        ssize_t nread = read(clientfd, recvbuf, sizeof(recvbuf) - 1);
-        if (nread <= 0) {
-            fprintf(stderr, "Server closed connection\n");
-            break;
-        }
-
-        recvbuf[nread] = '\0';
-        printf("echoed: %s", recvbuf);
-    }
-
-    close(clientfd);
+    // 사용자 입력 끝내면
+    // 서버와 연결을 닫는다
+    Close(clientfd);
     return 0;
 }
