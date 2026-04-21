@@ -7,345 +7,276 @@
  *   - Fixed sprintf() aliasing issue in serve_static(), and clienterror().
  */
 #include "csapp.h"
-#include "string.h"
+#include <string.h>
+
+
+// cd C:\Users\JCB\week8\webproxy_lab_docker
+// docker build -f .devcontainer\Dockerfile -t proxylab-dev .devcontainer
+// docker run --rm -it -p 8001:8001 -v C:\Users\JCB\week8\webproxy_lab_docker:/workspaces/webproxy_lab_docker -w /workspaces/webproxy_lab_docker/webproxy-lab/tiny proxylab-dev bash
+// ls
+// make
+// ./tiny 8000
+
+
 void doit(int fd);
 void read_requesthdrs(rio_t *rp);
 int parse_uri(char *uri, char *filename, char *cgiargs);
-void serve_static(int fd, char *filename, int filesize);
+void serve_static(int fd, char *filename, int filesize, int is_head);
 void get_filetype(char *filename, char *filetype);
-void serve_dynamic(int fd, char *filename, char *cgiargs);
+void serve_dynamic(int fd, char *filename, char *cgiargs, int is_head);
 void clienterror(int fd, char *cause, char *errnum, char *shortmsg,
                  char *longmsg);
 
-// 요청 처리
-void doit(inf fd)
+void doit(int fd)
 {
-  if(fd < 0)
-  {
-    printf("fd error");
-  }
+    int is_static;
+    int is_head;
+    struct stat sbuf;
+    ssize_t n;
+    rio_t rio;
+    char buf[MAXLINE], method[MAXLINE], uri[MAXLINE], version[MAXLINE];
+    char filename[MAXLINE], cgiargs[MAXLINE];
 
-  struct stat sbuf;
-  size_t n, isStatic;
-  rio_t rio;
-  char buf[MAXLINE];
-  char method[MAXLINE], uri[MAXLINE], version[MAXLINE];
+    Rio_readinitb(&rio, fd);
+    n = Rio_readlineb(&rio, buf, MAXLINE);
+    if (n <= 0) {
+        return;
+    }
 
-  // fileName : static이면 열어서 읽을 파일이름, dynamic이면 실행할 CGI 프로그램
-  // cgiargs : static이면 빈 문자열, dynamic이면 물음표 뒤 인자들
-  char filename[MAXLINE], char cgiargs[MAXLINE];
+    printf("%s", buf);
 
+    if (sscanf(buf, "%s %s %s", method, uri, version) != 3) {
+        clienterror(fd, buf, "400", "Bad Request",
+                    "Tiny could not parse request line");
+        return;
+    }
 
-  //rio 구조체 초기화
-  Rio_readinitb(&rio, fd);
+    if (strcasecmp(method, "GET") && strcasecmp(method, "HEAD")) {
+        clienterror(fd, method, "501", "Not Implemented",
+                    "Tiny does not implement this method");
+        return;
+    }
 
-  //읽은 바이트 수 저장
-  n = Rio_readlineb(&rio, buf, MAXLINE);
+    //method가 Head면 0반환
+    //method가 GET이면 1반환
+    is_head = !strcasecmp(method, "HEAD");
+    read_requesthdrs(&rio);
+    is_static = parse_uri(uri, filename, cgiargs);
+    if (stat(filename, &sbuf) < 0) {
+        clienterror(fd, filename, "404", "Not found",
+                    "Tiny couldn't find this file");
+        return;
+    }
 
-  // n이 0이면
-  if(n == 0)
-  {
-    return;
-  }
-
-  else if(n < 0)
-  {
-    //읽기 에러
-    printf("request line read failed");
-    return;
-  }
-
-  //GET /index.html HTTP/1.0
-  size_t parsedCount = sscanf(buf, "%s %s %s", method, uri, version); // 띄어쓰기 별로 끊어서 각각 저장
-
-  if(parsedCount != 3)
-  {
-    clienterror(fd, buf, 400, "Bad Request", "Tiny could not parse request line");
-    return;
-  }
-
-  if(strcmp(method, "GET") != 0)
-  {
-    clienterror(fd, buf, 501, "Not Implemented", "Tiny does not implement this method");
-    return;
-  }
-
-  // 여기까지 오면  GET /index.html HTTP/1.0  이런 상태이다
-  read_requesthdrs(&rio); // 헤더 무시
-
-
-  // uri 해석해서, 실제 파일경로 넣고, cgi 인자 넣고
-  isStatic = parse_uri(uri, filename, cgiargs); // 파서에서 uri보고 정적인지 동적인지 판단
-
-  //파일이 없다/ 경로가 잘못됨 / 접근 불가
-  if(stat(filename, sbuf) < 0)
-  {
-    clienterror(fd, filename, "404", "Not found", "Tiny couldn't find this file");
-  }
-
-  // 정적 콘텐츠 요청이면
-  if(isStatic)
-  {
-    serve_static(fd, filename, sbuf.st_size);
-  }
-
-  // 동적 콘텐츠 요청이면
-  else
-  {
-    serve_dynamic(fd, filename, sbuf.st_size);
-  }
-
-
+    if (is_static) {
+        if (!(S_ISREG(sbuf.st_mode)) || !(S_IRUSR & sbuf.st_mode)) {
+            clienterror(fd, filename, "403", "Forbidden",
+                        "Tiny couldn't read the file");
+            return;
+        }
+        serve_static(fd, filename, sbuf.st_size, is_head);
+    } else {
+        if (!(S_ISREG(sbuf.st_mode)) || !(S_IXUSR & sbuf.st_mode)) {
+            clienterror(fd, filename, "403", "Forbidden",
+                        "Tiny couldn't run the CGI program");
+            return;
+        }
+        serve_dynamic(fd, filename, cgiargs, is_head);
+    }
 }
 
-// doit에서 쓰는 rio를 넘겨받는다
-// 남은 헤더 줄 다 읽어버려서 무시
 void read_requesthdrs(rio_t *rp)
 {
-  char buf[MAXLINE];
+    char buf[MAXLINE];
 
-  //한 줄씩 읽는다
-  
-  while(1)
-  {
-    // 한줄 읽는다
-    size_t n = Rio_readlineb(rp, buf, MAXLINE);
-
-
-    if(n == 0)
-    {
-      break;
-    }
-
-    // 그 줄이 빈 줄이면
-    if(strcmp(buf, "\r\n") == 0)
-    {
-      break;
-    }
-  }
+    do {
+        if (Rio_readlineb(rp, buf, MAXLINE) <= 0) {
+            break;
+        }
+        printf("%s", buf); // 요청 buf 바로 출력
+    } while (strcmp(buf, "\r\n")); //이게 0이면 반복종료
 }
 
-// URI가 static인지 dynamic인지 판단
-// 실제 파일 경로를 filename에 만들어 넣기
-// CGI 인자가 있으면 cgiargs에 분리해서 넣기
 int parse_uri(char *uri, char *filename, char *cgiargs)
 {
-  // uri 보고 정적인지 동적인지 판단
-  // cgi-bin 있으면 동적이다/ 없으면 정적
+    char *ptr;
 
-  // 정적이다
-  if(strstr(uri, "cgi-bin") == 0)
-  {
-    // 정적 콘텐츠는 cgi 인자가 없으니까 비워두고
-    strcpy(cgiargs, "");
-
-    if(strcmp(uri, "/") == 0) // 맞으면 0반환
-    {
-      strcpy(filename, ".");
-
-      strcat(filename, uri);
-      strcat(filename, "home.html");
-      
-      return 1;
+    if (!strstr(uri, "cgi-bin")) {
+        strcpy(cgiargs, "");
+        strcpy(filename, ".");
+        strcat(filename, uri);
+        if (uri[strlen(uri) - 1] == '/') {
+            strcat(filename, "home.html");
+        }
+        return 1;
     }
 
-    // filename은 앞에 .을 붙여 경로를 만들어준다
-    strcpy(filename, ".");
-
-    strcat(filename, uri);
-
-    return 1;
-  }
-
-  // 동적이다
-  else
-  {
-    // uri안에 ?가 없다
-    if(strstr(uri, "?") == NULL)
-    {
-      //cgiargs(인자)에 빈 값대입
-      strcpy(cgiargs, "");
-
-      //filename에 ./cgi-bin/adder 저장
-      strcpy(filename, ".");
-      strcat(filename, uri);
-      return 0;
-    }
-
-
-    // ?의 위치를 받을 포인터
-    char* ptr;
-
-    // ptr이 uri내에서 ? 위치를 가리킨다
     ptr = strchr(uri, '?');
-
-    // ptr+1 즉 ?위치 그 다음부터를 cgiargs에 저장한다
-    strcpy(cgiargs, ptr + 1);
-    *ptr = '\0';
+    if (ptr) {
+        strcpy(cgiargs, ptr + 1);
+        *ptr = '\0';
+    } else {
+        strcpy(cgiargs, "");
+    }
 
     strcpy(filename, ".");
     strcat(filename, uri);
-
     return 0;
-
-  }
 }
 
-// 이 파일을 HTTP 응답 형식으로 포장해서 소켓 fd로 내보내는 함수
-// fd : 클라이언트와 연결된 소켓
-// filename : 보낼 실제 파일 경로
-// filesize : 응답 헤더의 Content-length에 넣을 파일 크기
-void serve_static(int fd, char *filename, int filesize)
+void serve_static(int fd, char *filename, int filesize, int is_head)
 {
+    int srcfd;
+    int n;
+    int remaining;
+    char *srcbuf;
+    char *p;
+    char filetype[MAXBUF], buf[MAXBUF];
 
-  int srcfd;
+    get_filetype(filename, filetype);
+    p = buf;
+    remaining = sizeof(buf);
 
-  //헤더
-  char *srcp;
-  char filetype[MAXSIZE], buf[MAXSIZE];
+    n = snprintf(p, remaining, "HTTP/1.0 200 OK\r\n");
+    p += n;
+    remaining -= n;
 
-  buf[0] = '\0';
+    n = snprintf(p, remaining, "Server: Tiny Web Server\r\n");
+    p += n;
+    remaining -= n;
 
-  //filetype에 Meme 채운다
-  //ex) image/gif
-  //file type보내야 클라이언트가 뭔지 알수있음
-  get_filetype(filename, filetype);
-  
-  // 헤더를 buf에 저장
-  sprintf(buf, "HTTP/1.0 200 OK\r\n");
-  sprintf(buf + strlen(buf), "Server: Tiny Web Server\r\n");
-  sprintf(buf + strlen(buf), "Connection: close\r\n");
-  sprintf(buf + strlen(buf), "Content-Length: %d\r\n", filesize);
-  sprintf(buf + strlen(buf), "Content-type: %s\r\n\r\n", filetype);
-  
-  //클라에게 헤더 보낸다
-  Rio_writen(fd, buf, strlen(buf));
+    n = snprintf(p, remaining, "Connection: close\r\n");
+    p += n;
+    remaining -= n;
 
-  //서버 터미널에 출력
-  printf("Response headers:\n");
-  printf("%s", buf);
+    n = snprintf(p, remaining, "Content-length: %d\r\n", filesize);
+    p += n;
+    remaining -= n;
 
-  //진짜 보낼 파일을 연다
-  //서버 디스크에 있는 home.html 파일을 연다
-  //srcfd = 파일자체
-  srcfd = Open(filename, 0);
+    snprintf(p, remaining, "Content-type: %s\r\n\r\n", filetype);
 
-  //파일 내용을 메모리 주소 공간에 연결한다
-  //filesize 만큼 매핑, PROT_READ : 읽기만 할거다, MAP_PRIVATE : private mapping, srcfd : 아까 연파일, 파일 시작 위치부터ㅇ
-  srcp = Mmap(0, filesize, PROT_READ, MAP_PRIVATE, srcfd, 0); // 파일 내용의 시작주소
+    Rio_writen(fd, buf, strlen(buf));
 
-  //파일 디스크립터 닫는다
-  //파일 내용 이미 Mmap으로 메모리에 붙여놓음
-  //파일 여는 역할 끝남
-  Close(srcfd);
+    if (is_head) {
+        return;
+    }
 
-  // 바디를 브라우저에 보낸다
-  Rio_writen(fd, srcp, filesize);
+    /*
+    // Mmap이 파일 내용을 그냥 가상 메모리에 매핑해준다(그래서 read 필요없음)
+     * Original version using mmap:
+     * srcfd = Open(filename, O_RDONLY, 0); // 파일 열어서
+     * srcp = Mmap(0, filesize, PROT_READ, MAP_PRIVATE, srcfd, 0); // 파일을 메모리 주소에 연결
+     * Close(srcfd); // 파일 닫는다
+     * Rio_writen(fd, srcp, filesize); // 파일 내용을 그대로 클라이언트 소켓으로 보낸다
+     * Munmap(srcp, filesize);
+     */
 
-  //메모리에 붙여놓은 파일 매핑 해제한다
-  Munmap(srcp, filesize);
+    //이전 버전 
+    //Mmap()으로 파일을 가상 메모리에 매핑
+    //그 매핑된 메모리 주소를 바로 Rio_writen으로 소켓에 전송
+    //끝나면 Munmap()으로 해제
+
+    //현재 버전
+    //Malloc으로 직접 버퍼를 만든다
+    //Rio_readn()으로 파일 내용을 그 버퍼에 읽어온다
+    //Rio_writen()으로 클라이언트에 보냄
+    //Free()로 버퍼 해제
+    srcfd = Open(filename, O_RDONLY, 0);
+    srcbuf = Malloc(filesize);
+    Rio_readn(srcfd, srcbuf, filesize);
+    Close(srcfd);
+
+    Rio_writen(fd, srcbuf, filesize);
+    Free(srcbuf);
 }
 
 void get_filetype(char *filename, char *filetype)
 {
-  //filename안에 .html이 있으면
-  if(strstr(filename, ".html"))
-  {
-    strcpy(filetype, "text/html");
-  }
-  else if(strstr(filename, ".gif"))
-  {
-    strcpy(filetype, "image/gif");
-  }
-  else if(strstr(filename, ".png"))
-  {
-    strcpy(filetype, "image/png");
-  }
-  else if(strstr(filename, ".jpg"))
-  {
-    strcpy(filetype, "image/jpg");
-  }
-  else
-  {
-    strcpy(filetype, "text/plain");
-  }
-
+    if (strstr(filename, ".html")) {
+        strcpy(filetype, "text/html");
+    } else if (strstr(filename, ".gif")) {
+        strcpy(filetype, "image/gif");
+    } else if (strstr(filename, ".png")) {
+        strcpy(filetype, "image/png");
+    } else if (strstr(filename, ".jpg")) {
+        strcpy(filetype, "image/jpg");
+    }
+    else if (strstr(filename, ".mpg")) {
+        strcpy(filetype, "video/mpg");
+    }
+    else if (strstr(filename, ".mp4")) {
+        strcpy(filetype, "video/mp4");
+    } 
+    else {
+        strcpy(filetype, "text/plain");
+    }
 }
 
-void serve_dynamic(int fd, char *filename, char *cgiargs)
+void serve_dynamic(int fd, char *filename, char *cgiargs, int is_head)
 {
-  //cgi프로그램 실행해서 그 프로그램의 출력결과를 보내는 함수
+    char buf[MAXLINE], *emptylist[] = { NULL };
 
-  //fork로 cgi 프로세스 실행
+    sprintf(buf, "HTTP/1.0 200 OK\r\n");
+    Rio_writen(fd, buf, strlen(buf));
+    sprintf(buf, "Server: Tiny Web Server\r\n");
+    Rio_writen(fd, buf, strlen(buf));
+    sprintf(buf, "\r\n");
+    Rio_writen(fd, buf, strlen(buf));
 
-  char buf[MAXLINE], *emptylist[] = {NULL};
+    if (is_head) {
+        return;
+    }
 
-  //buf에 저장
-  sprintf(buf, "HTTP.1.0 200 OK\r\n");
-  Rio_writen(fd, buf, strlen(buf)); // 버퍼 덮어쓰기
-  sprintf(buf, "Server : Tiny Web Server\r\n");
-  Rio_writen(fd, buf, strlen(buf)); // 버퍼 덮어쓰기
-
-  // 프로세스를 둘로 쪼갠다(부모 프로세스, 자식 프로세스)
-  if(Fork() == 0)
-  {
-    //QUERY_STRING에 cgiargs 넣는다
-    setenv("QUERY_STRING", cgiargs, 1);
-
-    // 자식 프로세스의 표준출력(STDOUT_FILENO)을 클라이언트 소켓fd로 바꿔치기한다
-    // 즉 원래는 printf()하면 터미널로 출력되었을텐데, 이제는 브라우저로 간다
-    Dup2(fd, STDOUT_FILENO); // STDOUT_FILENO가 원래 가리키던 곳 대신, 이제 fd 소켓을 가리키게 해라!
-    Execve(filename, emptylist, environ);
-  }
-  Wait(NULL);
+    if (Fork() == 0) {
+        setenv("QUERY_STRING", cgiargs, 1);
+        Dup2(fd, STDOUT_FILENO);
+        Execve(filename, emptylist, environ);
+    }
+    Wait(NULL);
 }
 
-void clienterror(int fd, char *cause, char *errnum, char *shortmsg, char *longmsg)
+void clienterror(int fd, char *cause, char *errnum, char *shortmsg,
+                 char *longmsg)
 {
+    char buf[MAXLINE], body[MAXBUF];
 
+    body[0] = '\0';
+    sprintf(body, "<html><title>Tiny Error</title>");
+    sprintf(body + strlen(body), "<body bgcolor=\"ffffff\">\r\n");
+    sprintf(body + strlen(body), "%s: %s\r\n", errnum, shortmsg);
+    sprintf(body + strlen(body), "<p>%s: %s\r\n", longmsg, cause);
+    sprintf(body + strlen(body), "<hr><em>The Tiny web server</em>\r\n");
+
+    sprintf(buf, "HTTP/1.0 %s %s\r\n", errnum, shortmsg);
+    Rio_writen(fd, buf, strlen(buf));
+    sprintf(buf, "Content-type: text/html\r\n");
+    Rio_writen(fd, buf, strlen(buf));
+    sprintf(buf, "Content-length: %d\r\n\r\n", (int)strlen(body));
+    Rio_writen(fd, buf, strlen(buf));
+    Rio_writen(fd, body, strlen(body));
 }
-
 
 int main(int argc, char **argv)
 {
-  // listen 소켓, 클라이언트 소켓
-  int listenfd, connfd;
+    int listenfd, connfd;
+    socklen_t clientlen;
+    struct sockaddr_storage clientaddr;
+    char hostname[MAXLINE], port[MAXLINE];
 
-  // host, port
-  char hostname[MAXLINE], port[MAXLINE];
+    if (argc != 2) {
+        fprintf(stderr, "usage: %s <port>\n", argv[0]);
+        exit(1);
+    }
 
-  // 길이
-  socklen_t clientlen;
-
-  // 주소 구조체
-  struct sockaddr_storage clientaddr;
-
-  /* Check command line args */
-  if (argc != 2)
-  {
-    fprintf(stderr, "usage: %s <port>\n", argv[0]);
-    exit(1);
-  }
-
-  // 포트로 listen 소켓 만든다
-  listenfd = Open_listenfd(argv[1]);
-
-  // 
-  while (1)
-  {
-    clientlen = sizeof(clientaddr);
-    
-    // 클라이언트 소켓
-    connfd = Accept(listenfd, (SA *)&clientaddr, &clientlen); // line:netp:tiny:accept
-
-    // 주소를 문자열로
-    Getnameinfo((SA *)&clientaddr, clientlen, hostname, MAXLINE, port, MAXLINE, 0);
-    
-    // 클라의 port가 연결이 되었다
-    printf("Accepted connection from (%s, %s)\n", hostname, port);
-    
-    doit(connfd);  // line:netp:tiny:doit
-    
-    Close(connfd); // line:netp:tiny:close
-  }
+    listenfd = Open_listenfd(argv[1]);
+    while (1) {
+        clientlen = sizeof(clientaddr);
+        connfd = Accept(listenfd, (SA *)&clientaddr, &clientlen);
+        Getnameinfo((SA *)&clientaddr, clientlen, hostname, MAXLINE, port,
+                    MAXLINE, 0);
+        printf("Accepted connection from (%s, %s)\n", hostname, port);
+        doit(connfd);
+        Close(connfd);
+    }
 }
+/* $end tinymain */
