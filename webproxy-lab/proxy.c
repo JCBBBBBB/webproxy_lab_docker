@@ -72,7 +72,7 @@ int main(int argc, char **argv)
   }
 
   listenfd = Open_listenfd(argv[1]); // 프록시 서버가 해당 포트에서 클라 연결을 기다릴 수 있게 여는 것
-
+//
   while(1)
   {
     clientlen = sizeof(clientaddr); // 클라이언트 주소 구조체 크기
